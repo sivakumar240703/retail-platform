@@ -1,4 +1,4 @@
- pipeline {
+pipeline {
     agent any
 
     parameters {
@@ -29,18 +29,24 @@
         choice(
             name: 'FORCE_HEALTH_FAILURE',
             choices: ['NO', 'YES'],
-            description: 'Use YES only for mandatory rollback failure demonstration'
+            description: 'Use YES only for mandatory rollback demonstration'
         )
     }
 
     environment {
         APP_NAME = 'retail-app'
         NETWORK_NAME = 'retail-network'
+
         PROD_CONTAINER = 'retail-app-prod'
         CANDIDATE_CONTAINER = 'retail-app-candidate'
         PREVIOUS_CONTAINER = 'retail-app-previous'
+
         PROD_PORT = '8081'
         CANDIDATE_PORT = '8082'
+
+        ROLLBACK_REQUIRED = 'NO'
+        RELEASE_COMMIT = ''
+        PREVIOUS_IMAGE = ''
     }
 
     stages {
@@ -48,7 +54,6 @@
         stage('Validate Parameters') {
             steps {
                 script {
-
                     echo "========================================"
                     echo "DEPLOYMENT ACTION : ${params.DEPLOYMENT_ACTION}"
                     echo "ENVIRONMENT        : ${params.ENVIRONMENT}"
@@ -60,10 +65,7 @@
                     if (params.ENVIRONMENT == 'PRODUCTION' &&
                         params.CONFIRM_PROD != 'YES') {
 
-                        error(
-                            "PRODUCTION deployment BLOCKED. " +
-                            "CONFIRM_PROD must be YES."
-                        )
+                        error("PRODUCTION deployment BLOCKED. CONFIRM_PROD must be YES.")
                     }
 
                     if (params.DEPLOYMENT_ACTION == 'ROLLBACK' &&
@@ -78,7 +80,6 @@
         stage('Git Validation') {
             steps {
                 script {
-
                     bat 'git fetch --tags --force'
 
                     def tagName = "v${params.VERSION}"
@@ -95,8 +96,8 @@
                     env.RELEASE_COMMIT = commit
 
                     echo "========================================"
-                    echo "Git Tag    : ${tagName}"
-                    echo "Git Commit : ${env.RELEASE_COMMIT}"
+                    echo "Validated Git Tag    : ${tagName}"
+                    echo "Release Git Commit   : ${env.RELEASE_COMMIT}"
                     echo "========================================"
                 }
             }
@@ -111,7 +112,6 @@
 
             steps {
                 script {
-
                     def imageName = "${APP_NAME}:${params.VERSION}"
 
                     echo "Building Docker image: ${imageName}"
@@ -122,17 +122,14 @@
                             variable: 'APP_SECRET'
                         )
                     ]) {
-
                         bat """
-                            docker build ^
-                            -t ${imageName} ^
-                            .
+                            docker build -t ${imageName} .
                         """
                     }
 
                     bat "docker image inspect ${imageName}"
 
-                    echo "Docker image created successfully."
+                    echo "Docker image build successful."
                 }
             }
         }
@@ -140,8 +137,8 @@
         stage('Prepare Network') {
             steps {
                 bat """
-                    docker network inspect ${NETWORK_NAME} >nul 2>&1 ^
-                    || docker network create ${NETWORK_NAME}
+                    docker network inspect ${NETWORK_NAME} >nul 2>&1
+                    if errorlevel 1 docker network create ${NETWORK_NAME}
                 """
             }
         }
@@ -156,24 +153,18 @@
 
             steps {
                 script {
-
-                    def existing = bat(
-                        script: """
-                            docker ps -a ^
-                            --filter name=^${PROD_CONTAINER}\\$ ^
-                            --format "{{.Names}}"
-                        """,
+                    def containers = bat(
+                        script: 'docker ps -a --format "{{.Names}}"',
                         returnStdout: true
                     ).trim()
 
-                    if (existing) {
+                    if (containers.split("\\r?\\n").contains(env.PROD_CONTAINER)) {
 
                         echo "Previous production container found."
 
                         env.PREVIOUS_IMAGE = bat(
                             script: """
-                                docker inspect ${PROD_CONTAINER} ^
-                                --format="{{.Config.Image}}"
+                                docker inspect ${PROD_CONTAINER} --format="{{.Config.Image}}"
                             """,
                             returnStdout: true
                         ).trim()
@@ -181,9 +172,17 @@
                         echo "Previous production image: ${env.PREVIOUS_IMAGE}"
 
                         bat """
-                            docker rm -f ${PREVIOUS_CONTAINER} >nul 2>&1 || exit /b 0
+                            docker rm -f ${PREVIOUS_CONTAINER} >nul 2>&1
+                            if errorlevel 1 exit /b 0
+                        """
+
+                        bat """
                             docker rename ${PROD_CONTAINER} ${PREVIOUS_CONTAINER}
                         """
+
+                        env.ROLLBACK_REQUIRED = 'YES'
+
+                        echo "Previous production preserved for automatic rollback."
 
                     } else {
 
@@ -203,7 +202,6 @@
 
             steps {
                 script {
-
                     def imageName = "${APP_NAME}:${params.VERSION}"
 
                     def healthStatus =
@@ -212,10 +210,13 @@
                         : 'healthy'
 
                     bat """
-                        docker rm -f ${CANDIDATE_CONTAINER} >nul 2>&1 || exit /b 0
+                        docker rm -f ${CANDIDATE_CONTAINER} >nul 2>&1
+                        if errorlevel 1 exit /b 0
                     """
 
                     echo "Starting candidate container."
+                    echo "Candidate image : ${imageName}"
+                    echo "Health mode     : ${healthStatus}"
 
                     bat """
                         docker run -d ^
@@ -230,7 +231,7 @@
                         ${imageName}
                     """
 
-                    echo "Candidate container started."
+                    echo "Candidate container started successfully."
                 }
             }
         }
@@ -244,16 +245,13 @@
 
             steps {
                 script {
-
-                    echo "Waiting for Docker health check..."
+                    echo "Waiting for Docker HEALTHCHECK..."
 
                     bat 'timeout /t 20 /nobreak'
 
                     def health = bat(
                         script: """
-                            docker inspect ^
-                            --format="{{.State.Health.Status}}" ^
-                            ${CANDIDATE_CONTAINER}
+                            docker inspect ${CANDIDATE_CONTAINER} --format="{{.State.Health.Status}}"
                         """,
                         returnStdout: true
                     ).trim()
@@ -261,10 +259,14 @@
                     echo "Candidate health status: ${health}"
 
                     if (health != 'healthy') {
-                        error(
-                            "HEALTH CHECK FAILED. " +
-                            "Candidate status: ${health}"
-                        )
+
+                        echo "========================================"
+                        echo "HEALTH CHECK FAILED"
+                        echo "Candidate version: ${params.VERSION}"
+                        echo "Health status    : ${health}"
+                        echo "========================================"
+
+                        error("Candidate health check failed.")
                     }
 
                     bat """
@@ -290,7 +292,8 @@
                     echo "Promoting healthy candidate to production."
 
                     bat """
-                        docker rm -f ${PROD_CONTAINER} >nul 2>&1 || exit /b 0
+                        docker rm -f ${PROD_CONTAINER} >nul 2>&1
+                        if errorlevel 1 exit /b 0
                     """
 
                     bat """
@@ -306,11 +309,34 @@
                         ${APP_NAME}:${params.VERSION}
                     """
 
+                    echo "New production container started."
+
+                    bat 'timeout /t 15 /nobreak'
+
+                    def productionHealth = bat(
+                        script: """
+                            docker inspect ${PROD_CONTAINER} --format="{{.State.Health.Status}}"
+                        """,
+                        returnStdout: true
+                    ).trim()
+
+                    echo "Production health status: ${productionHealth}"
+
+                    if (productionHealth != 'healthy') {
+                        error("Production health check failed after promotion.")
+                    }
+
                     bat """
                         docker rm -f ${CANDIDATE_CONTAINER}
                     """
 
-                    echo "Production deployment completed."
+                    env.ROLLBACK_REQUIRED = 'NO'
+
+                    echo "========================================"
+                    echo "PRODUCTION DEPLOYMENT SUCCESSFUL"
+                    echo "Version : ${params.VERSION}"
+                    echo "Commit  : ${env.RELEASE_COMMIT}"
+                    echo "========================================"
                 }
             }
         }
@@ -328,22 +354,17 @@
                     echo "Starting manual rollback."
 
                     bat """
-                        docker rm -f ${PROD_CONTAINER} >nul 2>&1 || exit /b 0
+                        docker rm -f ${PROD_CONTAINER} >nul 2>&1
+                        if errorlevel 1 exit /b 0
                     """
 
-                    def previousExists = bat(
-                        script: """
-                            docker ps -a ^
-                            --filter name=^${PREVIOUS_CONTAINER}\\$ ^
-                            --format "{{.Names}}"
-                        """,
+                    def containers = bat(
+                        script: 'docker ps -a --format "{{.Names}}"',
                         returnStdout: true
                     ).trim()
 
-                    if (!previousExists) {
-                        error(
-                            "Rollback failed: previous production container not found."
-                        )
+                    if (!containers.split("\\r?\\n").contains(env.PREVIOUS_CONTAINER)) {
+                        error("Rollback failed: previous production container not found.")
                     }
 
                     bat """
@@ -358,9 +379,7 @@
 
                     def rollbackHealth = bat(
                         script: """
-                            docker inspect ^
-                            --format="{{.State.Health.Status}}" ^
-                            ${PROD_CONTAINER}
+                            docker inspect ${PROD_CONTAINER} --format="{{.State.Health.Status}}"
                         """,
                         returnStdout: true
                     ).trim()
@@ -379,24 +398,89 @@
 
     post {
 
+        failure {
+            script {
+
+                if (env.ROLLBACK_REQUIRED == 'YES' &&
+                    params.DEPLOYMENT_ACTION == 'DEPLOY' &&
+                    params.ENVIRONMENT == 'PRODUCTION') {
+
+                    echo "========================================"
+                    echo "AUTOMATIC ROLLBACK STARTED"
+                    echo "========================================"
+
+                    bat """
+                        docker rm -f ${CANDIDATE_CONTAINER} >nul 2>&1
+                        if errorlevel 1 exit /b 0
+                    """
+
+                    bat """
+                        docker rm -f ${PROD_CONTAINER} >nul 2>&1
+                        if errorlevel 1 exit /b 0
+                    """
+
+                    def containers = bat(
+                        script: 'docker ps -a --format "{{.Names}}"',
+                        returnStdout: true
+                    ).trim()
+
+                    if (containers.split("\\r?\\n").contains(env.PREVIOUS_CONTAINER)) {
+
+                        bat """
+                            docker rename ${PREVIOUS_CONTAINER} ${PROD_CONTAINER}
+                        """
+
+                        bat """
+                            docker start ${PROD_CONTAINER}
+                        """
+
+                        bat 'timeout /t 15 /nobreak'
+
+                        def rollbackHealth = bat(
+                            script: """
+                                docker inspect ${PROD_CONTAINER} --format="{{.State.Health.Status}}"
+                            """,
+                            returnStdout: true
+                        ).trim()
+
+                        echo "Rollback health status: ${rollbackHealth}"
+
+                        if (rollbackHealth == 'healthy') {
+
+                            echo "========================================"
+                            echo "AUTOMATIC ROLLBACK SUCCESSFUL"
+                            echo "Previous image : ${env.PREVIOUS_IMAGE}"
+                            echo "Final container: ${PROD_CONTAINER}"
+                            echo "Final health   : healthy"
+                            echo "========================================"
+
+                        } else {
+
+                            echo "AUTOMATIC ROLLBACK FAILED."
+                            echo "Rollback health: ${rollbackHealth}"
+                        }
+
+                    } else {
+
+                        echo "AUTOMATIC ROLLBACK FAILED: previous container not found."
+                    }
+                }
+            }
+        }
+
         success {
             echo "========================================"
             echo "PIPELINE SUCCESS"
             echo "========================================"
         }
 
-        failure {
-            echo "========================================"
-            echo "PIPELINE FAILED"
-            echo "========================================"
-        }
-
         always {
             echo "========================================"
-            echo "Deployment summary"
+            echo "DEPLOYMENT SUMMARY"
             echo "Action      : ${params.DEPLOYMENT_ACTION}"
             echo "Environment : ${params.ENVIRONMENT}"
             echo "Version     : ${params.VERSION}"
+            echo "Git Commit  : ${env.RELEASE_COMMIT}"
             echo "========================================"
         }
     }
