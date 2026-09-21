@@ -1,4 +1,3 @@
-
 pipeline {
 
     agent any
@@ -32,7 +31,7 @@ pipeline {
         choice(
             name: 'FORCE_HEALTH_FAILURE',
             choices: ['NO', 'YES'],
-            description: 'Use YES only for mandatory rollback demonstration'
+            description: 'Use YES for rollback demonstration'
         )
     }
 
@@ -75,7 +74,6 @@ pipeline {
                         params.ENVIRONMENT == 'PRODUCTION' &&
                         params.CONFIRM_PROD != 'YES'
                     ) {
-
                         error(
                             "PRODUCTION deployment BLOCKED. " +
                             "CONFIRM_PROD must be YES."
@@ -86,7 +84,6 @@ pipeline {
                         params.DEPLOYMENT_ACTION == 'ROLLBACK' &&
                         params.ENVIRONMENT != 'PRODUCTION'
                     ) {
-
                         error(
                             "ROLLBACK is allowed only for PRODUCTION."
                         )
@@ -98,7 +95,6 @@ pipeline {
         stage('Git Validation') {
 
             when {
-
                 expression {
                     params.DEPLOYMENT_ACTION == 'DEPLOY'
                 }
@@ -119,14 +115,15 @@ pipeline {
                     echo "Checking Git tag: ${tagName}"
 
                     /*
-                     * PowerShell captures Git output directly.
-                     * No Windows batch redirection is used.
+                     * Get the commit SHA connected to the tag.
+                     * PowerShell is used instead of BAT output capture.
                      */
 
                     def tagCommitOutput = powershell(
                         returnStdout: true,
                         script: """
-                            git rev-list -n 1 refs/tags/${tagName}
+                            \$ErrorActionPreference = 'Stop'
+                            git rev-parse "${tagName}^{commit}"
                         """
                     ).trim()
 
@@ -141,11 +138,12 @@ pipeline {
 
                         error(
                             "Git tag ${tagName} does not exist or " +
-                            "its commit could not be determined."
+                            "its commit could not be determined. " +
+                            "Git output: ${tagCommitOutput}"
                         )
                     }
 
-                    env.RELEASE_COMMIT = tagCommit.toString()
+                    env.RELEASE_COMMIT = tagCommit
 
                     echo "========================================"
                     echo "Git Validation Successful"
@@ -159,7 +157,6 @@ pipeline {
         stage('Docker Build') {
 
             when {
-
                 expression {
                     params.DEPLOYMENT_ACTION == 'DEPLOY'
                 }
@@ -239,10 +236,6 @@ pipeline {
 
                     echo "Checking existing production container..."
 
-                    /*
-                     * PowerShell returns container names.
-                     */
-
                     def containersOutput = powershell(
                         returnStdout: true,
                         script: """
@@ -250,21 +243,16 @@ pipeline {
                         """
                     ).trim()
 
-                    def containerList =
-                        containersOutput
-                            ? containersOutput
-                                .readLines()
-                                .collect { it.trim() }
-                                .findAll { it }
-                            : []
+                    def containerList = containersOutput
+                        ? containersOutput
+                            .readLines()
+                            .collect { it.trim() }
+                            .findAll { it }
+                        : []
 
                     if (containerList.contains(env.PROD_CONTAINER)) {
 
                         echo "Previous production container found."
-
-                        /*
-                         * Get previous image using PowerShell.
-                         */
 
                         env.PREVIOUS_IMAGE = powershell(
                             returnStdout: true,
@@ -298,7 +286,7 @@ pipeline {
                         env.ROLLBACK_REQUIRED = 'YES'
 
                         echo "Previous production preserved."
-                        echo "Automatic rollback is now available."
+                        echo "Automatic rollback is available."
 
                     } else {
 
@@ -388,24 +376,22 @@ pipeline {
                     bat 'ping 127.0.0.1 -n 21 >nul'
 
                     /*
-                     * FIX:
-                     * Use PowerShell instead of bat redirection.
+                     * IMPORTANT:
+                     * PowerShell stores only the final Docker status.
+                     * Select-Object -Last 1 prevents command-output confusion.
                      */
 
                     def healthOutput = powershell(
                         returnStdout: true,
                         script: """
-                            & "\${env:DOCKER_EXE}" inspect ${CANDIDATE_CONTAINER} --format="{{.State.Health.Status}}"
+                            \$status = & "\${env:DOCKER_EXE}" inspect ${CANDIDATE_CONTAINER} --format="{{.State.Health.Status}}"
+                            \$status | Select-Object -Last 1
                         """
                     ).trim()
 
-                    /*
-                     * Select only the valid Docker health value.
-                     */
-
                     def health = healthOutput
                         .readLines()
-                        .collect { it.trim() }
+                        .collect { line -> line.trim() }
                         .find { line ->
                             line in [
                                 'starting',
@@ -416,10 +402,17 @@ pipeline {
                         }
 
                     if (!health) {
-                        health = healthOutput
+                        health = 'unknown'
                     }
 
                     echo "Candidate health status: ${health}"
+
+                    if (params.FORCE_HEALTH_FAILURE == 'YES') {
+
+                        echo "Forced health failure enabled."
+
+                        health = 'unhealthy'
+                    }
 
                     if (health != 'healthy') {
 
@@ -438,7 +431,11 @@ pipeline {
                         curl --fail http://localhost:${CANDIDATE_PORT}/health
                     """
 
+                    echo "========================================"
                     echo "Candidate health check PASSED."
+                    echo "Candidate version: ${params.VERSION}"
+                    echo "Candidate health : ${health}"
+                    echo "========================================"
                 }
             }
         }
@@ -488,20 +485,17 @@ pipeline {
 
                     bat 'ping 127.0.0.1 -n 16 >nul'
 
-                    /*
-                     * Production health using PowerShell.
-                     */
-
                     def productionHealthOutput = powershell(
                         returnStdout: true,
                         script: """
-                            & "\${env:DOCKER_EXE}" inspect ${PROD_CONTAINER} --format="{{.State.Health.Status}}"
+                            \$status = & "\${env:DOCKER_EXE}" inspect ${PROD_CONTAINER} --format="{{.State.Health.Status}}"
+                            \$status | Select-Object -Last 1
                         """
                     ).trim()
 
                     def productionHealth = productionHealthOutput
                         .readLines()
-                        .collect { it.trim() }
+                        .collect { line -> line.trim() }
                         .find { line ->
                             line in [
                                 'starting',
@@ -512,7 +506,7 @@ pipeline {
                         }
 
                     if (!productionHealth) {
-                        productionHealth = productionHealthOutput
+                        productionHealth = 'unknown'
                     }
 
                     echo "Production health status: ${productionHealth}"
@@ -536,13 +530,12 @@ pipeline {
                         )
                     """
 
-                    bat """
-                        "%DOCKER_EXE%" rm -f ${PREVIOUS_CONTAINER} >nul 2>&1
-
-                        if errorlevel 1 (
-                            exit /b 0
-                        )
-                    """
+                    /*
+                     * Do not remove PREVIOUS_CONTAINER here if you want
+                     * to support manual rollback in a later build.
+                     *
+                     * The previous container is retained.
+                     */
 
                     env.ROLLBACK_REQUIRED = 'NO'
 
@@ -580,10 +573,6 @@ pipeline {
                         )
                     """
 
-                    /*
-                     * Get container names using PowerShell.
-                     */
-
                     def containersOutput = powershell(
                         returnStdout: true,
                         script: """
@@ -591,13 +580,12 @@ pipeline {
                         """
                     ).trim()
 
-                    def containerList =
-                        containersOutput
-                            ? containersOutput
-                                .readLines()
-                                .collect { it.trim() }
-                                .findAll { it }
-                            : []
+                    def containerList = containersOutput
+                        ? containersOutput
+                            .readLines()
+                            .collect { it.trim() }
+                            .findAll { it }
+                        : []
 
                     if (!containerList.contains(env.PREVIOUS_CONTAINER)) {
 
@@ -616,20 +604,17 @@ pipeline {
 
                     bat 'ping 127.0.0.1 -n 16 >nul'
 
-                    /*
-                     * Rollback health using PowerShell.
-                     */
-
                     def rollbackHealthOutput = powershell(
                         returnStdout: true,
                         script: """
-                            & "\${env:DOCKER_EXE}" inspect ${PROD_CONTAINER} --format="{{.State.Health.Status}}"
+                            \$status = & "\${env:DOCKER_EXE}" inspect ${PROD_CONTAINER} --format="{{.State.Health.Status}}"
+                            \$status | Select-Object -Last 1
                         """
                     ).trim()
 
                     def rollbackHealth = rollbackHealthOutput
                         .readLines()
-                        .collect { it.trim() }
+                        .collect { line -> line.trim() }
                         .find { line ->
                             line in [
                                 'starting',
@@ -640,7 +625,7 @@ pipeline {
                         }
 
                     if (!rollbackHealth) {
-                        rollbackHealth = rollbackHealthOutput
+                        rollbackHealth = 'unknown'
                     }
 
                     echo "Rollback health: ${rollbackHealth}"
@@ -701,10 +686,6 @@ pipeline {
                         )
                     """
 
-                    /*
-                     * Get container names using PowerShell.
-                     */
-
                     def containersOutput = powershell(
                         returnStdout: true,
                         script: """
@@ -712,13 +693,12 @@ pipeline {
                         """
                     ).trim()
 
-                    def containerList =
-                        containersOutput
-                            ? containersOutput
-                                .readLines()
-                                .collect { it.trim() }
-                                .findAll { it }
-                            : []
+                    def containerList = containersOutput
+                        ? containersOutput
+                            .readLines()
+                            .collect { it.trim() }
+                            .findAll { it }
+                        : []
 
                     if (containerList.contains(env.PREVIOUS_CONTAINER)) {
 
@@ -735,20 +715,17 @@ pipeline {
 
                         bat 'ping 127.0.0.1 -n 16 >nul'
 
-                        /*
-                         * Automatic rollback health using PowerShell.
-                         */
-
                         def rollbackHealthOutput = powershell(
                             returnStdout: true,
                             script: """
-                                & "\${env:DOCKER_EXE}" inspect ${PROD_CONTAINER} --format="{{.State.Health.Status}}"
+                                \$status = & "\${env:DOCKER_EXE}" inspect ${PROD_CONTAINER} --format="{{.State.Health.Status}}"
+                                \$status | Select-Object -Last 1
                             """
                         ).trim()
 
                         def rollbackHealth = rollbackHealthOutput
                             .readLines()
-                            .collect { it.trim() }
+                            .collect { line -> line.trim() }
                             .find { line ->
                                 line in [
                                     'starting',
@@ -759,7 +736,7 @@ pipeline {
                             }
 
                         if (!rollbackHealth) {
-                            rollbackHealth = rollbackHealthOutput
+                            rollbackHealth = 'unknown'
                         }
 
                         echo "Rollback health status: ${rollbackHealth}"
