@@ -1,5 +1,6 @@
 
 pipeline {
+
     agent any
 
     parameters {
@@ -56,10 +57,6 @@ pipeline {
 
     stages {
 
-        // =====================================================
-        // STAGE 1: VALIDATE PARAMETERS
-        // =====================================================
-
         stage('Validate Parameters') {
 
             steps {
@@ -98,11 +95,14 @@ pipeline {
             }
         }
 
-        // =====================================================
-        // STAGE 2: GIT VALIDATION
-        // =====================================================
-
         stage('Git Validation') {
+
+            when {
+
+                expression {
+                    params.DEPLOYMENT_ACTION == 'DEPLOY'
+                }
+            }
 
             steps {
 
@@ -118,21 +118,21 @@ pipeline {
 
                     echo "Checking Git tag: ${tagName}"
 
-                    def tagCommitOutput = bat(
-                        script: "@git rev-list -n 1 refs/tags/${tagName}",
-                        returnStdout: true
-                    ).trim()
-
                     /*
-                     * Windows Jenkins output can contain CR/LF characters.
-                     * trim() is applied to every individual line.
+                     * PowerShell captures Git output directly.
+                     * No Windows batch redirection is used.
                      */
+
+                    def tagCommitOutput = powershell(
+                        returnStdout: true,
+                        script: """
+                            git rev-list -n 1 refs/tags/${tagName}
+                        """
+                    ).trim()
 
                     def tagCommit = tagCommitOutput
                         .readLines()
-                        .collect { line ->
-                            line.trim()
-                        }
+                        .collect { line -> line.trim() }
                         .find { line ->
                             line ==~ /^[0-9a-fA-F]{40}$/
                         }
@@ -145,7 +145,7 @@ pipeline {
                         )
                     }
 
-                    env.RELEASE_COMMIT = tagCommit
+                    env.RELEASE_COMMIT = tagCommit.toString()
 
                     echo "========================================"
                     echo "Git Validation Successful"
@@ -155,10 +155,6 @@ pipeline {
                 }
             }
         }
-
-        // =====================================================
-        // STAGE 3: DOCKER BUILD
-        // =====================================================
 
         stage('Docker Build') {
 
@@ -205,10 +201,6 @@ pipeline {
             }
         }
 
-        // =====================================================
-        // STAGE 4: PREPARE DOCKER NETWORK
-        // =====================================================
-
         stage('Prepare Network') {
 
             steps {
@@ -230,10 +222,6 @@ pipeline {
             }
         }
 
-        // =====================================================
-        // STAGE 5: RECORD PREVIOUS PRODUCTION
-        // =====================================================
-
         stage('Record Previous Production') {
 
             when {
@@ -251,35 +239,41 @@ pipeline {
 
                     echo "Checking existing production container..."
 
-                    def containers = bat(
-                        script:
-                            '"%DOCKER_EXE%" ps -a --format "{{.Names}}"',
-                        returnStdout: true
+                    /*
+                     * PowerShell returns container names.
+                     */
+
+                    def containersOutput = powershell(
+                        returnStdout: true,
+                        script: """
+                            & "\${env:DOCKER_EXE}" ps -a --format "{{.Names}}"
+                        """
                     ).trim()
 
                     def containerList =
-                        containers
-                            ? containers
-                                .split("\\r?\\n")
+                        containersOutput
+                            ? containersOutput
+                                .readLines()
                                 .collect { it.trim() }
+                                .findAll { it }
                             : []
 
                     if (containerList.contains(env.PROD_CONTAINER)) {
 
                         echo "Previous production container found."
 
-                        env.PREVIOUS_IMAGE = bat(
+                        /*
+                         * Get previous image using PowerShell.
+                         */
+
+                        env.PREVIOUS_IMAGE = powershell(
+                            returnStdout: true,
                             script: """
-                                "%DOCKER_EXE%" inspect ${PROD_CONTAINER} --format="{{.Config.Image}}"
-                            """,
-                            returnStdout: true
+                                & "\${env:DOCKER_EXE}" inspect ${PROD_CONTAINER} --format="{{.Config.Image}}"
+                            """
                         ).trim()
 
                         echo "Previous production image: ${env.PREVIOUS_IMAGE}"
-
-                        /*
-                         * Remove any old previous container safely.
-                         */
 
                         bat """
                             "%DOCKER_EXE%" rm -f ${PREVIOUS_CONTAINER} >nul 2>&1
@@ -289,11 +283,6 @@ pipeline {
                             )
                         """
 
-                        /*
-                         * Stop the old production container first.
-                         * This releases port 8081.
-                         */
-
                         bat """
                             "%DOCKER_EXE%" stop ${PROD_CONTAINER} >nul 2>&1
 
@@ -301,11 +290,6 @@ pipeline {
                                 exit /b 0
                             )
                         """
-
-                        /*
-                         * Rename the stopped production container.
-                         * It can be restored during rollback.
-                         */
 
                         bat """
                             "%DOCKER_EXE%" rename ${PROD_CONTAINER} ${PREVIOUS_CONTAINER}
@@ -326,10 +310,6 @@ pipeline {
                 }
             }
         }
-
-        // =====================================================
-        // STAGE 6: DEPLOY CANDIDATE
-        // =====================================================
 
         stage('Deploy Candidate') {
 
@@ -360,10 +340,6 @@ pipeline {
                     echo "Git commit      : ${env.RELEASE_COMMIT}"
                     echo "========================================"
 
-                    /*
-                     * Remove an old candidate container safely.
-                     */
-
                     bat """
                         "%DOCKER_EXE%" rm -f ${CANDIDATE_CONTAINER} >nul 2>&1
 
@@ -390,10 +366,6 @@ pipeline {
             }
         }
 
-        // =====================================================
-        // STAGE 7: HEALTH CHECK
-        // =====================================================
-
         stage('Health Check') {
 
             when {
@@ -413,20 +385,39 @@ pipeline {
 
                     echo "Waiting for Docker HEALTHCHECK..."
 
-                    /*
-                     * Do not use timeout /t in Jenkins.
-                     * ping provides a safe Windows wait.
-                     * -n 21 approximately waits 20 seconds.
-                     */
-
                     bat 'ping 127.0.0.1 -n 21 >nul'
 
-                    def health = bat(
+                    /*
+                     * FIX:
+                     * Use PowerShell instead of bat redirection.
+                     */
+
+                    def healthOutput = powershell(
+                        returnStdout: true,
                         script: """
-                            "%DOCKER_EXE%" inspect ${CANDIDATE_CONTAINER} --format="{{.State.Health.Status}}"
-                        """,
-                        returnStdout: true
+                            & "\${env:DOCKER_EXE}" inspect ${CANDIDATE_CONTAINER} --format="{{.State.Health.Status}}"
+                        """
                     ).trim()
+
+                    /*
+                     * Select only the valid Docker health value.
+                     */
+
+                    def health = healthOutput
+                        .readLines()
+                        .collect { it.trim() }
+                        .find { line ->
+                            line in [
+                                'starting',
+                                'healthy',
+                                'unhealthy',
+                                'none'
+                            ]
+                        }
+
+                    if (!health) {
+                        health = healthOutput
+                    }
 
                     echo "Candidate health status: ${health}"
 
@@ -452,10 +443,6 @@ pipeline {
             }
         }
 
-        // =====================================================
-        // STAGE 8: PROMOTE TO PRODUCTION
-        // =====================================================
-
         stage('Promote To Production') {
 
             when {
@@ -475,11 +462,6 @@ pipeline {
                     echo "Promoting healthy candidate"
                     echo "to production"
                     echo "========================================"
-
-                    /*
-                     * The old production container was already stopped
-                     * and renamed during Record Previous Production.
-                     */
 
                     bat """
                         "%DOCKER_EXE%" rm -f ${PROD_CONTAINER} >nul 2>&1
@@ -504,18 +486,34 @@ pipeline {
 
                     echo "New production container started."
 
-                    /*
-                     * Wait approximately 15 seconds.
-                     */
-
                     bat 'ping 127.0.0.1 -n 16 >nul'
 
-                    def productionHealth = bat(
+                    /*
+                     * Production health using PowerShell.
+                     */
+
+                    def productionHealthOutput = powershell(
+                        returnStdout: true,
                         script: """
-                            "%DOCKER_EXE%" inspect ${PROD_CONTAINER} --format="{{.State.Health.Status}}"
-                        """,
-                        returnStdout: true
+                            & "\${env:DOCKER_EXE}" inspect ${PROD_CONTAINER} --format="{{.State.Health.Status}}"
+                        """
                     ).trim()
+
+                    def productionHealth = productionHealthOutput
+                        .readLines()
+                        .collect { it.trim() }
+                        .find { line ->
+                            line in [
+                                'starting',
+                                'healthy',
+                                'unhealthy',
+                                'none'
+                            ]
+                        }
+
+                    if (!productionHealth) {
+                        productionHealth = productionHealthOutput
+                    }
 
                     echo "Production health status: ${productionHealth}"
 
@@ -530,10 +528,6 @@ pipeline {
                         curl --fail http://localhost:${PROD_PORT}/health
                     """
 
-                    /*
-                     * Remove candidate only after production succeeds.
-                     */
-
                     bat """
                         "%DOCKER_EXE%" rm -f ${CANDIDATE_CONTAINER} >nul 2>&1
 
@@ -541,11 +535,6 @@ pipeline {
                             exit /b 0
                         )
                     """
-
-                    /*
-                     * Old previous container is no longer required
-                     * after successful production deployment.
-                     */
 
                     bat """
                         "%DOCKER_EXE%" rm -f ${PREVIOUS_CONTAINER} >nul 2>&1
@@ -565,10 +554,6 @@ pipeline {
                 }
             }
         }
-
-        // =====================================================
-        // STAGE 9: MANUAL ROLLBACK
-        // =====================================================
 
         stage('Manual Rollback') {
 
@@ -595,17 +580,23 @@ pipeline {
                         )
                     """
 
-                    def containers = bat(
-                        script:
-                            '"%DOCKER_EXE%" ps -a --format "{{.Names}}"',
-                        returnStdout: true
+                    /*
+                     * Get container names using PowerShell.
+                     */
+
+                    def containersOutput = powershell(
+                        returnStdout: true,
+                        script: """
+                            & "\${env:DOCKER_EXE}" ps -a --format "{{.Names}}"
+                        """
                     ).trim()
 
                     def containerList =
-                        containers
-                            ? containers
-                                .split("\\r?\\n")
+                        containersOutput
+                            ? containersOutput
+                                .readLines()
                                 .collect { it.trim() }
+                                .findAll { it }
                             : []
 
                     if (!containerList.contains(env.PREVIOUS_CONTAINER)) {
@@ -625,12 +616,32 @@ pipeline {
 
                     bat 'ping 127.0.0.1 -n 16 >nul'
 
-                    def rollbackHealth = bat(
+                    /*
+                     * Rollback health using PowerShell.
+                     */
+
+                    def rollbackHealthOutput = powershell(
+                        returnStdout: true,
                         script: """
-                            "%DOCKER_EXE%" inspect ${PROD_CONTAINER} --format="{{.State.Health.Status}}"
-                        """,
-                        returnStdout: true
+                            & "\${env:DOCKER_EXE}" inspect ${PROD_CONTAINER} --format="{{.State.Health.Status}}"
+                        """
                     ).trim()
+
+                    def rollbackHealth = rollbackHealthOutput
+                        .readLines()
+                        .collect { it.trim() }
+                        .find { line ->
+                            line in [
+                                'starting',
+                                'healthy',
+                                'unhealthy',
+                                'none'
+                            ]
+                        }
+
+                    if (!rollbackHealth) {
+                        rollbackHealth = rollbackHealthOutput
+                    }
 
                     echo "Rollback health: ${rollbackHealth}"
 
@@ -655,10 +666,6 @@ pipeline {
         }
     }
 
-    // =====================================================
-    // POST ACTIONS
-    // =====================================================
-
     post {
 
         failure {
@@ -678,10 +685,6 @@ pipeline {
                     echo "Failed version : ${params.VERSION}"
                     echo "Previous image : ${env.PREVIOUS_IMAGE}"
 
-                    /*
-                     * Remove failed candidate safely.
-                     */
-
                     bat """
                         "%DOCKER_EXE%" rm -f ${CANDIDATE_CONTAINER} >nul 2>&1
 
@@ -689,10 +692,6 @@ pipeline {
                             exit /b 0
                         )
                     """
-
-                    /*
-                     * Remove failed production container safely.
-                     */
 
                     bat """
                         "%DOCKER_EXE%" rm -f ${PROD_CONTAINER} >nul 2>&1
@@ -702,17 +701,23 @@ pipeline {
                         )
                     """
 
-                    def containers = bat(
-                        script:
-                            '"%DOCKER_EXE%" ps -a --format "{{.Names}}"',
-                        returnStdout: true
+                    /*
+                     * Get container names using PowerShell.
+                     */
+
+                    def containersOutput = powershell(
+                        returnStdout: true,
+                        script: """
+                            & "\${env:DOCKER_EXE}" ps -a --format "{{.Names}}"
+                        """
                     ).trim()
 
                     def containerList =
-                        containers
-                            ? containers
-                                .split("\\r?\\n")
+                        containersOutput
+                            ? containersOutput
+                                .readLines()
                                 .collect { it.trim() }
+                                .findAll { it }
                             : []
 
                     if (containerList.contains(env.PREVIOUS_CONTAINER)) {
@@ -730,12 +735,32 @@ pipeline {
 
                         bat 'ping 127.0.0.1 -n 16 >nul'
 
-                        def rollbackHealth = bat(
+                        /*
+                         * Automatic rollback health using PowerShell.
+                         */
+
+                        def rollbackHealthOutput = powershell(
+                            returnStdout: true,
                             script: """
-                                "%DOCKER_EXE%" inspect ${PROD_CONTAINER} --format="{{.State.Health.Status}}"
-                            """,
-                            returnStdout: true
+                                & "\${env:DOCKER_EXE}" inspect ${PROD_CONTAINER} --format="{{.State.Health.Status}}"
+                            """
                         ).trim()
+
+                        def rollbackHealth = rollbackHealthOutput
+                            .readLines()
+                            .collect { it.trim() }
+                            .find { line ->
+                                line in [
+                                    'starting',
+                                    'healthy',
+                                    'unhealthy',
+                                    'none'
+                                ]
+                            }
+
+                        if (!rollbackHealth) {
+                            rollbackHealth = rollbackHealthOutput
+                        }
 
                         echo "Rollback health status: ${rollbackHealth}"
 
