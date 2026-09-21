@@ -29,9 +29,9 @@ const server = http.createServer((req, res) => {
     if (req.url === "/payment") {
     res.writeHead(200);
     res.end(JSON.stringify({
-        paymentStatus: "FAILED",
+        paymentStatus: "FIXED",
         version: APP_VERSION,
-        message: "Payment processing is NOT WORKING"
+        message: "Payment processing is WORKING"
        }));
        return;
    }
