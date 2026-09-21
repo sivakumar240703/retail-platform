@@ -1,7 +1,9 @@
+
 pipeline {
     agent any
 
     parameters {
+
         choice(
             name: 'DEPLOYMENT_ACTION',
             choices: ['DEPLOY', 'ROLLBACK'],
@@ -34,6 +36,7 @@ pipeline {
     }
 
     environment {
+
         DOCKER_EXE = 'C:\\Users\\Administrator\\AppData\\Local\\Programs\\DockerDesktop\\resources\\bin\\docker.exe'
 
         APP_NAME = 'retail-app'
@@ -53,19 +56,28 @@ pipeline {
 
     stages {
 
+        // =====================================================
+        // STAGE 1: VALIDATE PARAMETERS
+        // =====================================================
+
         stage('Validate Parameters') {
+
             steps {
+
                 script {
+
                     echo "========================================"
                     echo "DEPLOYMENT ACTION : ${params.DEPLOYMENT_ACTION}"
-                    echo "ENVIRONMENT        : ${params.ENVIRONMENT}"
-                    echo "VERSION            : ${params.VERSION}"
-                    echo "CONFIRM_PROD       : ${params.CONFIRM_PROD}"
-                    echo "FORCE HEALTH FAIL  : ${params.FORCE_HEALTH_FAILURE}"
+                    echo "ENVIRONMENT       : ${params.ENVIRONMENT}"
+                    echo "VERSION           : ${params.VERSION}"
+                    echo "CONFIRM_PROD      : ${params.CONFIRM_PROD}"
+                    echo "FORCE HEALTH FAIL : ${params.FORCE_HEALTH_FAILURE}"
                     echo "========================================"
 
-                    if (params.ENVIRONMENT == 'PRODUCTION' &&
-                        params.CONFIRM_PROD != 'YES') {
+                    if (
+                        params.ENVIRONMENT == 'PRODUCTION' &&
+                        params.CONFIRM_PROD != 'YES'
+                    ) {
 
                         error(
                             "PRODUCTION deployment BLOCKED. " +
@@ -73,8 +85,10 @@ pipeline {
                         )
                     }
 
-                    if (params.DEPLOYMENT_ACTION == 'ROLLBACK' &&
-                        params.ENVIRONMENT != 'PRODUCTION') {
+                    if (
+                        params.DEPLOYMENT_ACTION == 'ROLLBACK' &&
+                        params.ENVIRONMENT != 'PRODUCTION'
+                    ) {
 
                         error(
                             "ROLLBACK is allowed only for PRODUCTION."
@@ -84,56 +98,79 @@ pipeline {
             }
         }
 
+        // =====================================================
+        // STAGE 2: GIT VALIDATION
+        // =====================================================
+
         stage('Git Validation') {
-    steps {
-        script {
 
-            echo "========================================"
-            echo "Git Release Validation"
-            echo "========================================"
+            steps {
 
-            bat 'git fetch --tags --force'
+                script {
 
-            def tagName = "v${params.VERSION}"
+                    echo "========================================"
+                    echo "Git Release Validation"
+                    echo "========================================"
 
-            echo "Checking Git tag: ${tagName}"
+                    bat 'git fetch --tags --force'
 
-            def tagCommitOutput = bat(
-                script: "@git rev-list -n 1 refs/tags/${tagName}",
-                returnStdout: true
-            ).trim()
+                    def tagName = "v${params.VERSION}"
 
-            def tagCommit = tagCommitOutput
-                .readLines()
-                .find { line ->
-                    line ==~ /[0-9a-fA-F]{40}/
+                    echo "Checking Git tag: ${tagName}"
+
+                    def tagCommitOutput = bat(
+                        script: "@git rev-list -n 1 refs/tags/${tagName}",
+                        returnStdout: true
+                    ).trim()
+
+                    /*
+                     * Windows Jenkins output can contain CR/LF characters.
+                     * trim() is applied to every individual line.
+                     */
+
+                    def tagCommit = tagCommitOutput
+                        .readLines()
+                        .collect { line ->
+                            line.trim()
+                        }
+                        .find { line ->
+                            line ==~ /^[0-9a-fA-F]{40}$/
+                        }
+
+                    if (!tagCommit) {
+
+                        error(
+                            "Git tag ${tagName} does not exist or " +
+                            "its commit could not be determined."
+                        )
+                    }
+
+                    env.RELEASE_COMMIT = tagCommit
+
+                    echo "========================================"
+                    echo "Git Validation Successful"
+                    echo "Validated Git Tag  : ${tagName}"
+                    echo "Release Git Commit : ${env.RELEASE_COMMIT}"
+                    echo "========================================"
                 }
-
-            if (!tagCommit) {
-                error(
-                    "Git tag ${tagName} does not exist or " +
-                    "its commit could not be determined."
-                )
             }
-
-            env.RELEASE_COMMIT = tagCommit
-
-            echo "========================================"
-            echo "Git Validation Successful"
-            echo "Validated Git Tag  : ${tagName}"
-            echo "Release Git Commit : ${env.RELEASE_COMMIT}"
-            echo "========================================"
         }
-    }
-}
+
+        // =====================================================
+        // STAGE 3: DOCKER BUILD
+        // =====================================================
+
         stage('Docker Build') {
+
             when {
+
                 expression {
                     params.DEPLOYMENT_ACTION == 'DEPLOY'
                 }
             }
 
             steps {
+
                 script {
 
                     def imageName =
@@ -153,7 +190,9 @@ pipeline {
 
                         bat """
                             "%DOCKER_EXE%" version
-                            "%DOCKER_EXE%" build -t ${imageName} .
+
+                            "%DOCKER_EXE%" build ^
+                            -t ${imageName} .
                         """
                     }
 
@@ -166,8 +205,14 @@ pipeline {
             }
         }
 
+        // =====================================================
+        // STAGE 4: PREPARE DOCKER NETWORK
+        // =====================================================
+
         stage('Prepare Network') {
+
             steps {
+
                 script {
 
                     echo "Preparing Docker network..."
@@ -185,15 +230,23 @@ pipeline {
             }
         }
 
+        // =====================================================
+        // STAGE 5: RECORD PREVIOUS PRODUCTION
+        // =====================================================
+
         stage('Record Previous Production') {
+
             when {
+
                 expression {
+
                     params.DEPLOYMENT_ACTION == 'DEPLOY' &&
                     params.ENVIRONMENT == 'PRODUCTION'
                 }
             }
 
             steps {
+
                 script {
 
                     echo "Checking existing production container..."
@@ -206,7 +259,9 @@ pipeline {
 
                     def containerList =
                         containers
-                            ? containers.split("\\r?\\n")
+                            ? containers
+                                .split("\\r?\\n")
+                                .collect { it.trim() }
                             : []
 
                     if (containerList.contains(env.PROD_CONTAINER)) {
@@ -214,18 +269,43 @@ pipeline {
                         echo "Previous production container found."
 
                         env.PREVIOUS_IMAGE = bat(
-                            script:
-                                """
+                            script: """
                                 "%DOCKER_EXE%" inspect ${PROD_CONTAINER} --format="{{.Config.Image}}"
-                                """,
+                            """,
                             returnStdout: true
                         ).trim()
 
                         echo "Previous production image: ${env.PREVIOUS_IMAGE}"
 
+                        /*
+                         * Remove any old previous container safely.
+                         */
+
                         bat """
                             "%DOCKER_EXE%" rm -f ${PREVIOUS_CONTAINER} >nul 2>&1
+
+                            if errorlevel 1 (
+                                exit /b 0
+                            )
                         """
+
+                        /*
+                         * Stop the old production container first.
+                         * This releases port 8081.
+                         */
+
+                        bat """
+                            "%DOCKER_EXE%" stop ${PROD_CONTAINER} >nul 2>&1
+
+                            if errorlevel 1 (
+                                exit /b 0
+                            )
+                        """
+
+                        /*
+                         * Rename the stopped production container.
+                         * It can be restored during rollback.
+                         */
 
                         bat """
                             "%DOCKER_EXE%" rename ${PROD_CONTAINER} ${PREVIOUS_CONTAINER}
@@ -247,14 +327,21 @@ pipeline {
             }
         }
 
+        // =====================================================
+        // STAGE 6: DEPLOY CANDIDATE
+        // =====================================================
+
         stage('Deploy Candidate') {
+
             when {
+
                 expression {
                     params.DEPLOYMENT_ACTION == 'DEPLOY'
                 }
             }
 
             steps {
+
                 script {
 
                     def imageName =
@@ -273,8 +360,16 @@ pipeline {
                     echo "Git commit      : ${env.RELEASE_COMMIT}"
                     echo "========================================"
 
+                    /*
+                     * Remove an old candidate container safely.
+                     */
+
                     bat """
                         "%DOCKER_EXE%" rm -f ${CANDIDATE_CONTAINER} >nul 2>&1
+
+                        if errorlevel 1 (
+                            exit /b 0
+                        )
                     """
 
                     bat """
@@ -295,14 +390,21 @@ pipeline {
             }
         }
 
+        // =====================================================
+        // STAGE 7: HEALTH CHECK
+        // =====================================================
+
         stage('Health Check') {
+
             when {
+
                 expression {
                     params.DEPLOYMENT_ACTION == 'DEPLOY'
                 }
             }
 
             steps {
+
                 script {
 
                     echo "========================================"
@@ -311,13 +413,18 @@ pipeline {
 
                     echo "Waiting for Docker HEALTHCHECK..."
 
-                    bat 'timeout /t 20 /nobreak'
+                    /*
+                     * Do not use timeout /t in Jenkins.
+                     * ping provides a safe Windows wait.
+                     * -n 21 approximately waits 20 seconds.
+                     */
+
+                    bat 'ping 127.0.0.1 -n 21 >nul'
 
                     def health = bat(
-                        script:
-                            """
+                        script: """
                             "%DOCKER_EXE%" inspect ${CANDIDATE_CONTAINER} --format="{{.State.Health.Status}}"
-                            """,
+                        """,
                         returnStdout: true
                     ).trim()
 
@@ -345,15 +452,23 @@ pipeline {
             }
         }
 
+        // =====================================================
+        // STAGE 8: PROMOTE TO PRODUCTION
+        // =====================================================
+
         stage('Promote To Production') {
+
             when {
+
                 expression {
+
                     params.DEPLOYMENT_ACTION == 'DEPLOY' &&
                     params.ENVIRONMENT == 'PRODUCTION'
                 }
             }
 
             steps {
+
                 script {
 
                     echo "========================================"
@@ -361,8 +476,17 @@ pipeline {
                     echo "to production"
                     echo "========================================"
 
+                    /*
+                     * The old production container was already stopped
+                     * and renamed during Record Previous Production.
+                     */
+
                     bat """
                         "%DOCKER_EXE%" rm -f ${PROD_CONTAINER} >nul 2>&1
+
+                        if errorlevel 1 (
+                            exit /b 0
+                        )
                     """
 
                     bat """
@@ -380,13 +504,16 @@ pipeline {
 
                     echo "New production container started."
 
-                    bat 'timeout /t 15 /nobreak'
+                    /*
+                     * Wait approximately 15 seconds.
+                     */
+
+                    bat 'ping 127.0.0.1 -n 16 >nul'
 
                     def productionHealth = bat(
-                        script:
-                            """
+                        script: """
                             "%DOCKER_EXE%" inspect ${PROD_CONTAINER} --format="{{.State.Health.Status}}"
-                            """,
+                        """,
                         returnStdout: true
                     ).trim()
 
@@ -400,7 +527,32 @@ pipeline {
                     }
 
                     bat """
-                        "%DOCKER_EXE%" rm -f ${CANDIDATE_CONTAINER}
+                        curl --fail http://localhost:${PROD_PORT}/health
+                    """
+
+                    /*
+                     * Remove candidate only after production succeeds.
+                     */
+
+                    bat """
+                        "%DOCKER_EXE%" rm -f ${CANDIDATE_CONTAINER} >nul 2>&1
+
+                        if errorlevel 1 (
+                            exit /b 0
+                        )
+                    """
+
+                    /*
+                     * Old previous container is no longer required
+                     * after successful production deployment.
+                     */
+
+                    bat """
+                        "%DOCKER_EXE%" rm -f ${PREVIOUS_CONTAINER} >nul 2>&1
+
+                        if errorlevel 1 (
+                            exit /b 0
+                        )
                     """
 
                     env.ROLLBACK_REQUIRED = 'NO'
@@ -414,14 +566,21 @@ pipeline {
             }
         }
 
+        // =====================================================
+        // STAGE 9: MANUAL ROLLBACK
+        // =====================================================
+
         stage('Manual Rollback') {
+
             when {
+
                 expression {
                     params.DEPLOYMENT_ACTION == 'ROLLBACK'
                 }
             }
 
             steps {
+
                 script {
 
                     echo "========================================"
@@ -430,6 +589,10 @@ pipeline {
 
                     bat """
                         "%DOCKER_EXE%" rm -f ${PROD_CONTAINER} >nul 2>&1
+
+                        if errorlevel 1 (
+                            exit /b 0
+                        )
                     """
 
                     def containers = bat(
@@ -440,7 +603,9 @@ pipeline {
 
                     def containerList =
                         containers
-                            ? containers.split("\\r?\\n")
+                            ? containers
+                                .split("\\r?\\n")
+                                .collect { it.trim() }
                             : []
 
                     if (!containerList.contains(env.PREVIOUS_CONTAINER)) {
@@ -458,13 +623,12 @@ pipeline {
                         "%DOCKER_EXE%" start ${PROD_CONTAINER}
                     """
 
-                    bat 'timeout /t 15 /nobreak'
+                    bat 'ping 127.0.0.1 -n 16 >nul'
 
                     def rollbackHealth = bat(
-                        script:
-                            """
+                        script: """
                             "%DOCKER_EXE%" inspect ${PROD_CONTAINER} --format="{{.State.Health.Status}}"
-                            """,
+                        """,
                         returnStdout: true
                     ).trim()
 
@@ -477,6 +641,10 @@ pipeline {
                         )
                     }
 
+                    bat """
+                        curl --fail http://localhost:${PROD_PORT}/health
+                    """
+
                     echo "========================================"
                     echo "MANUAL ROLLBACK SUCCESSFUL"
                     echo "Final container: ${PROD_CONTAINER}"
@@ -487,9 +655,14 @@ pipeline {
         }
     }
 
+    // =====================================================
+    // POST ACTIONS
+    // =====================================================
+
     post {
 
         failure {
+
             script {
 
                 if (
@@ -505,12 +678,28 @@ pipeline {
                     echo "Failed version : ${params.VERSION}"
                     echo "Previous image : ${env.PREVIOUS_IMAGE}"
 
+                    /*
+                     * Remove failed candidate safely.
+                     */
+
                     bat """
                         "%DOCKER_EXE%" rm -f ${CANDIDATE_CONTAINER} >nul 2>&1
+
+                        if errorlevel 1 (
+                            exit /b 0
+                        )
                     """
+
+                    /*
+                     * Remove failed production container safely.
+                     */
 
                     bat """
                         "%DOCKER_EXE%" rm -f ${PROD_CONTAINER} >nul 2>&1
+
+                        if errorlevel 1 (
+                            exit /b 0
+                        )
                     """
 
                     def containers = bat(
@@ -521,7 +710,9 @@ pipeline {
 
                     def containerList =
                         containers
-                            ? containers.split("\\r?\\n")
+                            ? containers
+                                .split("\\r?\\n")
+                                .collect { it.trim() }
                             : []
 
                     if (containerList.contains(env.PREVIOUS_CONTAINER)) {
@@ -537,13 +728,12 @@ pipeline {
                             "%DOCKER_EXE%" start ${PROD_CONTAINER}
                         """
 
-                        bat 'timeout /t 15 /nobreak'
+                        bat 'ping 127.0.0.1 -n 16 >nul'
 
                         def rollbackHealth = bat(
-                            script:
-                                """
+                            script: """
                                 "%DOCKER_EXE%" inspect ${PROD_CONTAINER} --format="{{.State.Health.Status}}"
-                                """,
+                            """,
                             returnStdout: true
                         ).trim()
 
@@ -554,6 +744,7 @@ pipeline {
                             echo "========================================"
                             echo "AUTOMATIC ROLLBACK SUCCESSFUL"
                             echo "========================================"
+
                             echo "Previous image : ${env.PREVIOUS_IMAGE}"
                             echo "Final container: ${PROD_CONTAINER}"
                             echo "Final health   : healthy"
@@ -579,19 +770,23 @@ pipeline {
         }
 
         success {
+
             echo "========================================"
             echo "PIPELINE SUCCESS"
             echo "========================================"
         }
 
         always {
+
             echo "========================================"
             echo "DEPLOYMENT SUMMARY"
             echo "========================================"
+
             echo "Action      : ${params.DEPLOYMENT_ACTION}"
             echo "Environment : ${params.ENVIRONMENT}"
             echo "Version     : ${params.VERSION}"
             echo "Git Commit  : ${env.RELEASE_COMMIT}"
+
             echo "========================================"
         }
     }
