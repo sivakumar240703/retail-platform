@@ -1,0 +1,9 @@
+{
+  "name": "retail-platform",
+  "version": "4.2.0",
+  "description": "DevOps assessment retail platform application",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  }
+}

@@ -1,10 +1,5 @@
-\# Retail Platform
-
-
+# Retail Platform
 
 Release: 4.3.0
 
-
-
-Deployment environment: Release
-
+Deployment environment: Development + Release
