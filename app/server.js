@@ -55,6 +55,8 @@ const server = http.createServer((req, res) => {
                 "Headphones"
             ],
             category: "Retail",
+            count: 3,
+            available: true,
             version: APP_VERSION
         }));
         return;
