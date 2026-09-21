@@ -3,6 +3,7 @@ const http = require("http");
 const PORT = process.env.PORT || 8081;
 const APP_VERSION = process.env.APP_VERSION || "4.2.0";
 const GIT_COMMIT = process.env.GIT_COMMIT || "local-development";
+const HEALTH_STATUS = process.env.HEALTH_STATUS || "healthy";
 
 const server = http.createServer((req, res) => {
     res.setHeader("Content-Type", "application/json");
@@ -12,20 +13,28 @@ const server = http.createServer((req, res) => {
         res.end(JSON.stringify({
             application: "Retail Platform",
             version: APP_VERSION,
-            status: "RUNNING"
+            status: "DEVELOPMENT"
         }));
         return;
     }
 
     if (req.url === "/health") {
-        res.writeHead(200);
+    if (HEALTH_STATUS === "fail") {
+        res.writeHead(500);
         res.end(JSON.stringify({
-            status: "healthy",
+            status: "unhealthy",
             version: APP_VERSION
         }));
         return;
     }
 
+    res.writeHead(200);
+    res.end(JSON.stringify({
+        status: "healthy",
+        version: APP_VERSION
+    }));
+    return;
+}
     if (req.url === "/payment") {
     res.writeHead(200);
     res.end(JSON.stringify({

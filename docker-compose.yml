@@ -1,0 +1,35 @@
+services:
+  retail-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    image: retail-app:compose
+
+    container_name: retail-app-compose
+
+    ports:
+      - "8081:8081"
+
+    environment:
+      PORT: 8081
+      APP_VERSION: ${APP_VERSION:-4.2.0}
+      GIT_COMMIT: ${GIT_COMMIT:-local-development}
+      HEALTH_STATUS: ${HEALTH_STATUS:-healthy}
+
+    networks:
+      - retail-network
+
+    volumes:
+      - retail-data:/app/data
+
+    mem_limit: 256m
+    cpus: 0.50
+
+networks:
+  retail-network:
+    name: retail-network
+
+volumes:
+  retail-data:
+    name: retail-data
