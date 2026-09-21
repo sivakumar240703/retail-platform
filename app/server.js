@@ -12,7 +12,7 @@ const server = http.createServer((req, res) => {
         res.end(JSON.stringify({
             application: "Retail Platform",
             version: APP_VERSION,
-            status: "RUNNING"
+            status: "DEVELOPMENT"
         }));
         return;
     }
