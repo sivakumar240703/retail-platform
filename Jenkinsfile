@@ -85,50 +85,47 @@ pipeline {
         }
 
         stage('Git Validation') {
-            steps {
-                script {
+    steps {
+        script {
 
-                    echo "Fetching Git tags..."
+            echo "========================================"
+            echo "Git Release Validation"
+            echo "========================================"
 
-                    bat 'git fetch --tags --force'
+            bat 'git fetch --tags --force'
 
-                    def tagName = "v${params.VERSION}"
+            def tagName = "v${params.VERSION}"
 
-                    echo "Checking Git tag: ${tagName}"
+            echo "Checking Git tag: ${tagName}"
 
-                    def tagExists = bat(
-                        script: "@git rev-parse --verify ${tagName}^{commit}",
-                        returnStatus: true
-                    )
+            def tagCommitOutput = bat(
+                script: "@git rev-list -n 1 refs/tags/${tagName}",
+                returnStdout: true
+            ).trim()
 
-                    if (tagExists != 0) {
-                        error(
-                            "Git tag ${tagName} does not exist."
-                        )
-                    }
-
-                    def releaseCommit = bat(
-                        script: "@git rev-parse ${tagName}^{commit}",
-                        returnStdout: true
-                    ).trim()
-
-                    if (!releaseCommit) {
-                        error(
-                            "Unable to determine commit for ${tagName}."
-                        )
-                    }
-
-                    env.RELEASE_COMMIT = releaseCommit
-
-                    echo "========================================"
-                    echo "Git Validation Successful"
-                    echo "Validated Git Tag  : ${tagName}"
-                    echo "Release Git Commit : ${releaseCommit}"
-                    echo "========================================"
+            def tagCommit = tagCommitOutput
+                .readLines()
+                .find { line ->
+                    line ==~ /[0-9a-fA-F]{40}/
                 }
-            }
-        }
 
+            if (!tagCommit) {
+                error(
+                    "Git tag ${tagName} does not exist or " +
+                    "its commit could not be determined."
+                )
+            }
+
+            env.RELEASE_COMMIT = tagCommit
+
+            echo "========================================"
+            echo "Git Validation Successful"
+            echo "Validated Git Tag  : ${tagName}"
+            echo "Release Git Commit : ${env.RELEASE_COMMIT}"
+            echo "========================================"
+        }
+    }
+}
         stage('Docker Build') {
             when {
                 expression {
